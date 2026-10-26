@@ -1,0 +1,123 @@
+name: update
+
+# Daily: if crates.io has a newer, non-yanked, non-prerelease taplo-cli than
+# the version pinned in upstream.json (read from the crates.io sparse index,
+# https://index.crates.io/ta/pl/taplo-cli), pin that version and its index
+# checksum ("cksum") in upstream.json (repack reset to 0) and open a pull
+# request; build.yml then fetches the crate, refusing it unless its sha256
+# equals that checksum and it ships a Cargo.lock, and builds and tests the
+# result on every platform. Merging publishes (build.yml runs on the push to
+# main). Then make sure the packages for main's upstream.json are published:
+# every successful publish ends with a GitHub release v<version>, so a missing
+# release means "not published yet", and a failed build is retried every day
+# until it succeeds.
+#
+# If the new version compiles in a copyleft crate that upstream.json does not
+# list (.licenses.mpl_sources), the licence generator fails the bump's build:
+# that is a licence question for a maintainer, never resolved automatically.
+#
+# Monthly: keep the schedule alive. GitHub disables scheduled workflows after
+# 60 days without repository activity.
+
+on:
+  schedule:
+    - cron: "23 4 * * *"
+    - cron: "41 5 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  packages: write
+  actions: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    outputs:
+      missing: ${{ steps.check.outputs.missing }}
+      sha: ${{ steps.check.outputs.sha }}
+      bump: ${{ steps.bump.outputs.sha }}
+      branch: ${{ steps.bump.outputs.branch }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Is main's version published?
+        id: check
+        run: |
+          tag="v$(bash scripts/pkgver.sh)"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "missing=false" >> "$GITHUB_OUTPUT"; echo "$tag already released"
+          else
+            echo "missing=true" >> "$GITHUB_OUTPUT"; echo "$tag not released: building"
+          fi
+
+      - name: Keepalive (monthly)
+        if: github.event.schedule == '41 5 1 * *'
+        run: gh api -X PUT "repos/$GH_REPO/actions/workflows/update.yml/enable"
+
+      - name: Follow new taplo-cli versions on crates.io
+        id: follow
+        run: |
+          current=$(jq -er .version upstream.json)
+          curl -fsSL https://index.crates.io/ta/pl/taplo-cli -o index.jsonl
+          latest=$(jq -r 'select(.yanked == false) | .vers | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' index.jsonl | sort -V | tail -n1)
+          if [ -z "$latest" ] || [ "$latest" = "$current" ] || [ "$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -n1)" = "$current" ]; then
+            echo "taplo-cli $current is current"; rm index.jsonl; exit 0
+          fi
+          cksum=$(jq -r --arg v "$latest" 'select(.vers == $v) | .cksum' index.jsonl)
+          rm index.jsonl
+          [[ "$cksum" =~ ^[0-9a-f]{64}$ ]] || { echo "no index checksum for taplo-cli $latest" >&2; exit 1; }
+          echo "crates.io has taplo-cli $latest (cksum $cksum); pinned is $current"
+          jq --arg v "$latest" --arg c "$cksum" '.version = $v | .cksum = $c | .repack = 0' upstream.json > upstream.json.new
+          mv upstream.json.new upstream.json
+          cat upstream.json
+          echo "version=$(bash scripts/pkgver.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Open the bump pull request
+        id: bump
+        if: steps.follow.outputs.version != ''
+        env:
+          VERSION: ${{ steps.follow.outputs.version }}
+        run: |
+          branch="update/taplo-$VERSION"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          if gh pr list --head "$branch" --state open --json number --jq '.[0].number' | grep -q .; then
+            echo "pull request for $branch already open"; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -am "chore: update taplo to $VERSION"
+          git push --force origin "$branch"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          gh pr create --head "$branch" --base main --title "chore: update taplo to $VERSION" \
+            --body "crates.io published a new taplo-cli. upstream.json pins it with its crates.io index checksum; the build refuses a crate that does not match it or ships no Cargo.lock, and the licence generator refuses any copyleft crate not listed in upstream.json. The update run that opened this pull request then built and tested the packages on every platform (pull requests opened with GITHUB_TOKEN start no pr workflow); merging publishes them."
+
+  test-bump:
+    needs: update
+    if: needs.update.outputs.bump != ''
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ needs.update.outputs.bump }}
+      publish: false
+    secrets: inherit
+
+  build:
+    needs: update
+    if: needs.update.outputs.missing == 'true'
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ needs.update.outputs.sha }}
+      publish: true
+    secrets: inherit

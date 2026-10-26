@@ -1,0 +1,22 @@
+{
+  "crate": "taplo-cli",
+  "version": "0.10.0",
+  "cksum": "105c88e872aef8af352663aaf71b9d5311372fef237bed8de0a6d04857c7983f",
+  "repack": 0,
+  "platforms": ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"],
+  "builder": {
+    "rust_alpine": "rust:1.99.0-alpine3.24@sha256:0cce0a5e0e8ba67b455257a3a02a1d99005f382748789d6464460028810f1627",
+    "rust_toolchain": "1.99.0",
+    "macos_deployment_target": "12.0"
+  },
+  "licenses": {
+    "mpl_sources": [
+      {
+        "crate": "webpki-roots",
+        "version": "0.25.4",
+        "cksum": "5f20c57d8d7db6d3b86154206ae5d8fba62dd39573114de97c2cb0578251f8e1"
+      }
+    ],
+    "license_file_only": ["ring"]
+  }
+}

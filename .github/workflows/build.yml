@@ -1,0 +1,332 @@
+name: build
+
+# Fetches the taplo-cli crate pinned in upstream.json from crates.io (its sha256
+# must equal the crates.io index checksum pinned there, and it must ship its
+# Cargo.lock: a mismatch stops here, before anything is compiled), builds taplo
+# natively on each platform with upstream's default features and the locked
+# dependencies (linux: static musl, inside the pinned rust Alpine image;
+# darwin: system libraries only), writes THIRD-PARTY-LICENSES per platform,
+# renders the npm packages, packs them once, and installs the packed tarballs
+# on every platform's runner as a consumer would. When publishing, every
+# tarball and binary gets a build-provenance attestation, then the exact tested
+# tarballs go to GitHub Packages (platform packages first, the launcher last;
+# versions that already exist are skipped), then a GitHub release v<version>
+# carries the tarballs, the taplo-cli crate, the source of every MPL-2.0 crate
+# compiled in, THIRD-PARTY-LICENSES-<platform>, build-scripts.tar.gz and
+# SHA256SUMS. Pull requests (this workflow called from pr.yml) build and test
+# only.
+
+on:
+  push:
+    branches: [main]
+    paths: [upstream.json, licenses/**, scripts/**, packages/**, test/**, .github/workflows/build.yml]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the packages and the release
+        type: boolean
+        default: true
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to build
+        type: string
+        required: true
+      publish:
+        description: Publish the packages and the release
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}-${{ inputs.ref }}
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      sha: ${{ steps.meta.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Metadata
+        id: meta
+        run: |
+          {
+            echo "version=$(bash scripts/pkgver.sh)"
+            echo "sha=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: "Named test: a crate whose checksum does not match, or with no Cargo.lock, fails the fetch"
+        run: bash test/digest-mismatch.sh
+
+      - name: "Named tests: the third-party licence generator's policy"
+        run: node --test test/licenses.test.js
+
+      - name: Fetch the taplo-cli crate (crates.io index checksum verified)
+        run: bash scripts/fetch.sh build/upstream
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: source
+          path: build/upstream
+          if-no-files-found: error
+
+  build:
+    needs: fetch
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux-x64
+          - runner: ubuntu-24.04-arm
+            platform: linux-arm64
+          - runner: macos-latest
+            platform: darwin-arm64
+          - runner: macos-15-intel
+            platform: darwin-x64
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: source
+          path: build/upstream
+
+      - name: Build (linux, static musl, in the pinned rust Alpine image)
+        if: startsWith(matrix.platform, 'linux-')
+        run: |
+          image=$(jq -er .builder.rust_alpine upstream.json)
+          docker run --rm -v "$PWD:/w" -w /w "$image" sh -euc '
+            apk add --no-cache bash build-base jq nodejs
+            bash scripts/build.sh build/upstream build/bin
+            chown -R '"$(id -u):$(id -g)"' build
+          '
+
+      - name: Build (darwin, system libraries only)
+        if: startsWith(matrix.platform, 'darwin-')
+        run: |
+          toolchain=$(jq -er .builder.rust_toolchain upstream.json)
+          rustup toolchain install "$toolchain" --profile minimal
+          RUSTUP_TOOLCHAIN="$toolchain" bash scripts/build.sh build/upstream build/bin
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: taplo-${{ matrix.platform }}
+          path: build/bin
+          if-no-files-found: error
+
+  pack:
+    needs: [fetch, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: taplo-*
+          path: build/built
+
+      - name: Stage packages
+        run: |
+          # download-artifact names each directory after its artifact (taplo-<platform>).
+          for platform in $(jq -r '.platforms | join(" ")' upstream.json); do
+            mv "build/built/taplo-$platform" "build/built/$platform"
+          done
+          bash scripts/stage.sh build/built build/npm
+
+      - name: "Named tests: the launcher's platform errors"
+        run: TAPLO_LAUNCHER_DIR="$PWD/build/npm/taplo" node --test test/launcher.test.js
+
+      - name: Pack
+        run: |
+          mkdir -p dist/tgz
+          for dir in build/npm/*/; do
+            npm pack "./$dir" --pack-destination dist/tgz
+          done
+          ls -l dist/tgz
+          for f in dist/tgz/*.tgz; do
+            echo "== $f"; tar -tvzf "$f"
+          done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: npm
+          path: dist/tgz/*.tgz
+          if-no-files-found: error
+
+  test:
+    needs: pack
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux-x64
+          - runner: ubuntu-24.04-arm
+            platform: linux-arm64
+          - runner: macos-latest
+            platform: darwin-arm64
+          - runner: macos-15-intel
+            platform: darwin-x64
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: npm
+          path: dist/tgz
+
+      - name: "Named test: install the packed tarballs; version, fmt, get, lint, linkage, licences"
+        run: bash scripts/smoke.sh dist/tgz ${{ matrix.platform }}
+
+  publish:
+    needs: [fetch, test]
+    if: github.event_name != 'pull_request' && (github.event_name == 'push' || inputs.publish)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.fetch.outputs.version }}
+      SHA: ${{ needs.fetch.outputs.sha }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.fetch.outputs.sha }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://npm.pkg.github.com
+          scope: "@ai-swfactory-oss"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: npm
+          path: dist/tgz
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: source
+          path: dist/source
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: taplo-*
+          path: dist/built
+
+      - name: Extract the binaries to attest
+        run: |
+          mkdir -p dist/bin
+          for platform in $(jq -r '.platforms | join(" ")' upstream.json); do
+            tar -xzOf "dist/tgz/ai-swfactory-oss-taplo-$platform-$VERSION.tgz" package/bin/taplo > "dist/bin/taplo-$platform"
+            test -s "dist/bin/taplo-$platform"
+          done
+          sha256sum dist/bin/*
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            dist/tgz/*.tgz
+            dist/bin/taplo-*
+
+      - name: Publish to GitHub Packages (platforms first, launcher last)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          publish() {
+            local name=$1 file
+            file="dist/tgz/$(echo "${name#@}" | tr / -)-$VERSION.tgz"
+            if [ "$(npm view "$name@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
+              echo "$name@$VERSION already published: skipping"
+              return
+            fi
+            npm publish "$file" --tag latest
+          }
+          for platform in $(jq -r '.platforms | join(" ")' upstream.json); do
+            publish "@ai-swfactory-oss/taplo-$platform"
+          done
+          publish "@ai-swfactory-oss/taplo"
+
+      # The release carries the source the NOTICE in every package points at
+      # (MPL-2.0 section 3.2 for the MPL crates). It must never be deleted while
+      # the matching package version is served.
+      - name: Create GitHub release v${{ needs.fetch.outputs.version }} with the source
+        run: |
+          tag="v$VERSION"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag already exists: skipping"
+            exit 0
+          fi
+          crate=$(jq -er .crate upstream.json)
+          upstream=$(jq -er .version upstream.json)
+          mkdir -p dist/release
+          cp dist/tgz/*.tgz "dist/source/$crate-$upstream.crate" dist/release/
+          cp dist/source/LICENSE dist/release/LICENSE-taplo
+          for platform in $(jq -r '.platforms | join(" ")' upstream.json); do
+            cp "dist/built/taplo-$platform/THIRD-PARTY-LICENSES" "dist/release/THIRD-PARTY-LICENSES-$platform"
+            for f in "dist/built/taplo-$platform"/mpl-sources/*.crate; do
+              name=$(basename "$f")
+              if [ -e "dist/release/$name" ]; then
+                cmp "$f" "dist/release/$name"
+              else
+                cp "$f" "dist/release/$name"
+              fi
+            done
+          done
+          tar -czf dist/release/build-scripts.tar.gz upstream.json licenses scripts packages test .github LICENSE README.md
+          (cd dist/release && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
+          mpl=$(jq -r '[.licenses.mpl_sources[] | "`\(.crate)-\(.version).crate`"] | join(", ")' upstream.json)
+          {
+            echo "taplo $upstream, as npm packages on GitHub Packages, package version \`$VERSION\`."
+            echo
+            echo '```sh'
+            echo "npm install --save-dev @ai-swfactory-oss/taplo@$VERSION"
+            echo '```'
+            echo
+            echo "Built from \`$crate-$upstream.crate\` (attached; sha256 $(jq -r .cksum upstream.json), the crates.io index checksum) with its Cargo.lock and upstream's default features. linux: static (musl, $(jq -r .builder.rust_alpine upstream.json)); darwin: system libraries only."
+            echo
+            echo "**MPL-2.0 source:** the binaries include $mpl under the Mozilla Public License 2.0; that complete source is attached here, checksum-verified against the crates.io index."
+            echo
+            echo "Licences: taplo is MIT (\`LICENSE-taplo\`); every crate compiled in, with its licence text, is listed in \`THIRD-PARTY-LICENSES-<platform>\`. \`build-scripts.tar.gz\` holds the manifest, scripts and workflows; \`SHA256SUMS\` covers every asset."
+          } > dist/notes.md
+          gh release create "$tag" dist/release/* --target "$SHA" --title "$tag" --notes-file dist/notes.md --latest

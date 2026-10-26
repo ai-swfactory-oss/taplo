@@ -17,3 +17,4 @@ dist/
 .claude/cache/
 .claude/tmp/
 .claude/logs/
+build/

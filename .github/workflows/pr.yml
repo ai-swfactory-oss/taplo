@@ -1,0 +1,22 @@
+name: pr
+
+# Every pull request fetches the taplo-cli crate pinned in upstream.json
+# (crates.io index checksum verified), builds taplo on all four platforms, packs the packages,
+# and installs and tests them on all four platforms. Nothing is published or
+# attested: the publish job of build.yml is skipped for pull requests, but
+# GitHub validates the permissions it requests, so they are granted here.
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  attestations: write
+
+jobs:
+  test:
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ github.event.pull_request.head.sha }}

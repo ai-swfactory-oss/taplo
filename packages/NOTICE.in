@@ -1,0 +1,16 @@
+taplo - a TOML toolkit: formatter, linter and language server (tamasfe/taplo)
+https://github.com/tamasfe/taplo
+Copyright (c) 2020 Ferenc Tamás
+
+taplo is distributed under the MIT License (see LICENSE). It is provided
+"AS IS", without warranty of any kind.
+
+The binary is a Rust program built by this repository's workflow from the
+taplo-cli crate on crates.io, with upstream's default features and the exact
+dependency versions in the crate's Cargo.lock. It statically includes those
+crates under their own licences, listed with their licence texts in
+THIRD-PARTY-LICENSES.
+
+This npm package is published by ai-swfactory-oss
+(https://github.com/ai-swfactory-oss/taplo), which is not affiliated with the
+taplo project. The package is distributed under MIT.
