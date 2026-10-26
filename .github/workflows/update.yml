@@ -92,7 +92,8 @@ jobs:
         run: |
           branch="update/taplo-$VERSION"
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
-          if gh pr list --head "$branch" --state open --json number --jq '.[0].number' | grep -q .; then
+          open_pr=$(gh pr list --head "$branch" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$open_pr" ]; then
             echo "pull request for $branch already open"; exit 0
           fi
           git config user.name "github-actions[bot]"
