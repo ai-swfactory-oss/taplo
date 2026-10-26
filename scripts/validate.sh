@@ -8,7 +8,10 @@
 #      (@ai-swfactory-oss/yamllint, installed into a scratch prefix, never
 #      globally). A known-bad fixture must fail it first, so the check is not
 #      vacuous. A workflow GitHub cannot parse never runs, so the merge would
-#      publish nothing;
+#      publish nothing. Then no script, test or workflow may pipe into a
+#      reader that can exit before its input ends (head, grep -q, a quitting
+#      sed, tar): under pipefail the writer then fails on the closed pipe, at
+#      random. A fixture holding each form must be flagged first;
 #   2. named test test/digest-mismatch.sh: a crate whose sha256 does not match
 #      the pinned crates.io index checksum, or that ships no Cargo.lock, is
 #      refused and deleted; the true crate is accepted;
@@ -77,6 +80,21 @@ fi
 cat "$work/bad-workflow.txt"
 "$yamllint" -d "$syntax_only" .github/workflows/*.yml
 echo "workflows: YAML syntax OK"
+
+echo "== no pipe into an early-exiting reader"
+# Write the producer's output to a file first, then read the file.
+# A single bar (not ||), then the reader.
+early_exit='(^|[^|])\|[[:space:]]*(head|tar|grep[[:space:]]+(-[A-Za-z]*q|--quiet)|sed[[:space:]][^|]*[0-9$/]q)([[:space:]]|$)'
+# The fixture spells the bar through a variable so this file does not match.
+bar='|'
+printf '%s\n' "a $bar head -n1" "b $bar grep -q x" "c $bar grep -Eq x" "d $bar sed 1q" "e $bar tar -xf - m" >"$work/pipes-bad.sh"
+grep -cE "$early_exit" "$work/pipes-bad.sh" >"$work/pipes-bad.count" || true
+[ "$(cat "$work/pipes-bad.count")" = 5 ] || { echo "validate: the pipe check missed a fixture form" >&2; exit 1; }
+# Comment lines are prose, not commands.
+if grep -nE "$early_exit" scripts/*.sh test/*.sh .github/workflows/*.yml | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' >"$work/pipes.txt"; then
+  cat "$work/pipes.txt"; echo "validate: a pipe ends in a reader that can exit early; write to a file first" >&2; exit 1
+fi
+echo "pipes: no early-exiting reader"
 
 echo "== named test: digest mismatch"
 bash test/digest-mismatch.sh
