@@ -1,4 +1,7 @@
 {
   "version": 4,
-  "defaultBranch": "main"
+  "defaultBranch": "main",
+  "validate": {
+    "command": "bash scripts/validate.sh"
+  }
 }

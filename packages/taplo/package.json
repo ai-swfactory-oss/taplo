@@ -1,0 +1,26 @@
+{
+  "name": "@ai-swfactory-oss/taplo",
+  "description": "taplo (tamasfe/taplo), the TOML toolkit, as the native upstream binary for your platform: no WASM, no download at install time, no install scripts",
+  "keywords": [
+    "taplo",
+    "toml",
+    "formatter",
+    "linter"
+  ],
+  "main": "index.js",
+  "types": "index.d.ts",
+  "bin": {
+    "taplo": "bin/taplo.js"
+  },
+  "files": [
+    "bin/taplo.js",
+    "index.js",
+    "index.d.ts",
+    "LICENSE",
+    "NOTICE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}
